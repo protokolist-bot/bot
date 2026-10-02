@@ -3,14 +3,15 @@ plans.py
 ========
 Тарифы и параметры мониторинга себестоимости — в одном месте.
 
-Модель:
-- Free — лимитный (60 мин/мес), страховка от абузы бесплатным.
-- week — безлимит на 7 дней (249 ₽).
-- month — безлимит на 30 дней (749 ₽).
+Модель — ПАКЕТЫ ЧАСОВ (не безлимит):
+- Free     — пробный, 60 минут, помесячный сброс.
+- standard — 30 часов (1800 мин) за 300 ₽, пакет действует 30 дней.
+- max      — 100 часов (6000 мин) за 600 ₽, пакет действует 30 дней.
 
-"Безлимит" реальный для пользователя, но на стороне админа считается
-себестоимость каждого аккаунта. Если она превышает порог от дохода —
-аккаунт помечается и админ получает сигнал.
+Пакет действует N дней с момента покупки; минуты в пределах пакета.
+На стороне админа считается себестоимость каждого аккаунта раздельно
+(быстрый режим / спикеры). Если себестоимость превышает порог от дохода —
+аккаунт помечается и админ получает сигнал (/risky).
 """
 
 from dataclasses import dataclass
@@ -21,43 +22,43 @@ class Plan:
     code: str
     title: str
     price_rub: int
-    days: int              # срок действия (0 для Free — помесячный сброс)
-    minutes: int           # лимит минут (0 = безлимит)
+    days: int              # срок действия пакета в днях (0 для Free — помесячный сброс)
+    minutes: int           # лимит минут (0 = безлимит; у нас везде лимит)
     speakers: bool         # доступна ли диаризация
     all_summaries: bool
-    max_file_minutes: int  # лимит длины файла (0 = без лимита)
+    max_file_minutes: int  # лимит длины файла (0 = без лимита, действует глобальный)
     free_speaker_trials: int
 
 
 PLANS: dict[str, Plan] = {
     "free": Plan(
         code="free",
-        title="Free",
+        title="Пробный",
         price_rub=0,
         days=0,
-        minutes=60,            # лимитный
+        minutes=60,            # 60 минут
         speakers=False,
         all_summaries=False,
         max_file_minutes=30,
         free_speaker_trials=2,
     ),
-    "week": Plan(
-        code="week",
-        title="Неделя (безлимит)",
-        price_rub=249,
-        days=7,
-        minutes=0,             # безлимит
+    "standard": Plan(
+        code="standard",
+        title="Стандарт · 30 часов",
+        price_rub=300,
+        days=30,
+        minutes=30 * 60,       # 1800 минут = 30 часов
         speakers=True,
         all_summaries=True,
-        max_file_minutes=0,
+        max_file_minutes=0,    # действует глобальный лимит (3 часа)
         free_speaker_trials=0,
     ),
-    "month": Plan(
-        code="month",
-        title="Месяц (безлимит)",
-        price_rub=749,
+    "max": Plan(
+        code="max",
+        title="Макс · 100 часов",
+        price_rub=600,
         days=30,
-        minutes=0,             # безлимит
+        minutes=100 * 60,      # 6000 минут = 100 часов
         speakers=True,
         all_summaries=True,
         max_file_minutes=0,
@@ -67,8 +68,7 @@ PLANS: dict[str, Plan] = {
 
 DEFAULT_PLAN = "free"
 
-# Жёсткий потолок длины файла для ВСЕХ тарифов (включая безлимитные) — в минутах.
-# Защита от гигантских файлов, которые долго качать и обрабатывать.
+# Жёсткий потолок длины одного файла для ВСЕХ тарифов — в минутах.
 GLOBAL_MAX_FILE_MINUTES = 180  # 3 часа
 
 # --- Параметры мониторинга себестоимости ---
@@ -99,17 +99,21 @@ def account_cost(minutes_fast: float, minutes_speakers: float) -> float:
     return minutes_fast * COST_FAST_PER_MIN + minutes_speakers * COST_SPEAKERS_PER_MIN
 
 
+def _format_hours(minutes: int) -> str:
+    """Красиво показывает лимит: часы, если кратно, иначе минуты."""
+    if minutes >= 60 and minutes % 60 == 0:
+        return f"{minutes // 60} часов"
+    return f"{minutes} минут"
+
+
 def format_plan_card(plan: Plan) -> str:
     lines = [f"<b>{plan.title}</b>"]
     if plan.price_rub == 0:
         lines.append("Бесплатно")
     else:
-        lines.append(f"{plan.price_rub} ₽ / {plan.days} дн.")
+        lines.append(f"{plan.price_rub} ₽ / пакет на {plan.days} дн.")
 
-    if plan.minutes == 0:
-        lines.append("• Безлимитная транскрибация")
-    else:
-        lines.append(f"• {plan.minutes} минут аудио в месяц")
+    lines.append(f"• {_format_hours(plan.minutes)} расшифровки")
 
     if plan.speakers:
         lines.append("• Разметка по спикерам")
@@ -121,9 +125,7 @@ def format_plan_card(plan: Plan) -> str:
     else:
         lines.append("• Базовое саммари")
 
-    if plan.max_file_minutes > 0:
-        lines.append(f"• Длина файла: до {plan.max_file_minutes} мин")
-    else:
-        lines.append("• Длина файла: без лимита")
+    if plan.price_rub > 0:
+        lines.append(f"• Пакет действует {plan.days} дней")
 
     return "\n".join(lines)

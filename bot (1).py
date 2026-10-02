@@ -117,12 +117,17 @@ URL_OFERTA = "https://telegra.ph/PUBLICHNAYA-OFERTA-10-02-17"
 URL_PRIVACY = "https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-10-02-93"
 URL_REFUND = "https://telegra.ph/POLITIKA-VOZVRATA-10-02"
 
+# Аккаунт техподдержки для связи.
+SUPPORT_USERNAME = "emil_pay"
+SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
+
 TEXT_DOCS = (
     "📄 <b>Документы</b>\n\n"
     f"• <a href=\"{URL_OFERTA}\">Публичная оферта</a>\n"
     f"• <a href=\"{URL_PRIVACY}\">Политика конфиденциальности</a>\n"
     f"• <a href=\"{URL_REFUND}\">Политика возврата</a>\n\n"
-    "Оформляя подписку, вы принимаете условия оферты."
+    "Оформляя подписку, вы принимаете условия оферты.\n\n"
+    f"🛟 Техподдержка: @{SUPPORT_USERNAME}"
 )
 
 
@@ -173,13 +178,31 @@ def again_inline() -> InlineKeyboardMarkup:
 
 
 def subscribe_keyboard() -> InlineKeyboardMarkup:
-    """Экран тарифов с кнопками-заглушками (оплата пока не подключена)."""
+    """Экран тарифов: выбор тарифа + техподдержка."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"⭐ {PLANS['standard'].title} — {PLANS['standard'].price_rub} ₽",
                                   callback_data="buy:standard")],
             [InlineKeyboardButton(text=f"🚀 {PLANS['max'].title} — {PLANS['max'].price_rub} ₽",
                                   callback_data="buy:max")],
+            [InlineKeyboardButton(text="🛟 Техподдержка", url=SUPPORT_URL)],
+        ]
+    )
+
+
+def payment_method_keyboard(plan_code: str) -> InlineKeyboardMarkup:
+    """
+    Кнопки выбора способа оплаты для выбранного тарифа.
+    callback_data: "pay:<способ>:<тариф>" — card или sbp.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить картой",
+                                  callback_data=f"pay:card:{plan_code}")],
+            [InlineKeyboardButton(text="🏦 Оплатить по СБП",
+                                  callback_data=f"pay:sbp:{plan_code}")],
+            [InlineKeyboardButton(text="⬅️ Назад к тарифам",
+                                  callback_data="back:plans")],
         ]
     )
 
@@ -302,12 +325,60 @@ async def handle_limit(message: Message) -> None:
 
 
 @dp.callback_query(F.data.startswith("buy:"))
-async def handle_buy_stub(callback: CallbackQuery) -> None:
-    # Заглушка оплаты.
+async def handle_buy(callback: CallbackQuery) -> None:
+    """Выбран тариф — показываем выбор способа оплаты."""
     await callback.answer()
+    plan_code = callback.data.split(":", 1)[1]
+    plan = get_plan(plan_code)
+
+    text = (
+        f"Оформление: <b>{plan.title}</b>\n"
+        f"Стоимость: <b>{plan.price_rub} ₽</b> (пакет на {plan.days} дней)\n\n"
+        f"Выбери способ оплаты:"
+    )
     await callback.message.answer(
-        "⚠️ Оплата пока не подключена — скоро заработает!\n"
-        "Следи за обновлениями."
+        text, parse_mode="HTML",
+        reply_markup=payment_method_keyboard(plan_code),
+    )
+
+
+@dp.callback_query(F.data.startswith("pay:"))
+async def handle_payment_method(callback: CallbackQuery) -> None:
+    """
+    Выбран способ оплаты (card / sbp).
+    ПОКА заглушка: когда подключится платёжная система, здесь будет
+    создание счёта и ссылка на оплату. Структура уже готова под это.
+    """
+    await callback.answer()
+    _, method, plan_code = callback.data.split(":", 2)
+    plan = get_plan(plan_code)
+    method_name = "картой" if method == "card" else "по СБП"
+
+    await callback.message.answer(
+        f"💳 Оплата {method_name} тарифа <b>{plan.title}</b> "
+        f"на {plan.price_rub} ₽.\n\n"
+        f"⚠️ Приём платежей скоро заработает. "
+        f"По вопросам оплаты — <a href=\"{SUPPORT_URL}\">техподдержка</a>.",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+@dp.callback_query(F.data == "back:plans")
+async def handle_back_to_plans(callback: CallbackQuery) -> None:
+    """Вернуться к списку тарифов."""
+    await callback.answer()
+    cards = "\n\n".join(format_plan_card(p) for p in PLANS.values())
+    text = (
+        f"💎 <b>Тарифы</b>\n\n{cards}\n\n"
+        f"Оформляя подписку, вы принимаете "
+        f"<a href=\"{URL_OFERTA}\">оферту</a>, "
+        f"<a href=\"{URL_PRIVACY}\">политику конфиденциальности</a> и "
+        f"<a href=\"{URL_REFUND}\">политику возврата</a>."
+    )
+    await callback.message.answer(
+        text, parse_mode="HTML", reply_markup=subscribe_keyboard(),
+        disable_web_page_preview=True,
     )
 
 
