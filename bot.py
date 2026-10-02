@@ -105,13 +105,6 @@ TEXT_HELP = (
     "Поддерживаются YouTube, Instagram, TikTok, VK, X, Vimeo и другие платформы."
 )
 
-TEXT_ABOUT = (
-    "ℹ️ <b>О боте</b>\n\n"
-    "Протоколист превращает аудио и видео в текст и конспект.\n"
-    "Один голос — быстрое распознавание, несколько — разметка по спикерам.\n"
-    "Языки определяются автоматически."
-)
-
 # Юридические документы (требуются платёжной системой).
 URL_OFERTA = "https://telegra.ph/PUBLICHNAYA-OFERTA-10-02-17"
 URL_PRIVACY = "https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-10-02-93"
@@ -120,6 +113,17 @@ URL_REFUND = "https://telegra.ph/POLITIKA-VOZVRATA-10-02"
 # Аккаунт техподдержки для связи.
 SUPPORT_USERNAME = "emil_pay"
 SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
+
+TEXT_ABOUT = (
+    "ℹ️ <b>О боте</b>\n\n"
+    "Протоколист превращает аудио и видео в текст и конспект.\n"
+    "Один голос — быстрое распознавание, несколько — разметка по спикерам.\n"
+    "Языки определяются автоматически.\n\n"
+    "<b>Документы</b>\n"
+    f"• <a href=\"{URL_OFERTA}\">Публичная оферта</a>\n"
+    f"• <a href=\"{URL_PRIVACY}\">Политика конфиденциальности</a>\n"
+    f"• <a href=\"{URL_REFUND}\">Политика возврата</a>"
+)
 
 TEXT_DOCS = (
     "📄 <b>Документы</b>\n\n"
@@ -178,14 +182,22 @@ def again_inline() -> InlineKeyboardMarkup:
 
 
 def subscribe_keyboard() -> InlineKeyboardMarkup:
-    """Экран тарифов: выбор тарифа + техподдержка."""
+    """Экран тарифов: только выбор тарифа."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"⭐ {PLANS['standard'].title} — {PLANS['standard'].price_rub} ₽",
                                   callback_data="buy:standard")],
             [InlineKeyboardButton(text=f"🚀 {PLANS['max'].title} — {PLANS['max'].price_rub} ₽",
                                   callback_data="buy:max")],
-            [InlineKeyboardButton(text="🛟 Техподдержка", url=SUPPORT_URL)],
+        ]
+    )
+
+
+def support_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка связи со службой поддержки (для раздела «Помощь»)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛟 Служба поддержки", url=SUPPORT_URL)],
         ]
     )
 
@@ -201,6 +213,8 @@ def payment_method_keyboard(plan_code: str) -> InlineKeyboardMarkup:
                                   callback_data=f"pay:card:{plan_code}")],
             [InlineKeyboardButton(text="🏦 Оплатить по СБП",
                                   callback_data=f"pay:sbp:{plan_code}")],
+            [InlineKeyboardButton(text="✅ Оплатить",
+                                  callback_data=f"paynow:{plan_code}")],
             [InlineKeyboardButton(text="⬅️ Назад к тарифам",
                                   callback_data="back:plans")],
         ]
@@ -256,7 +270,8 @@ async def handle_start(message: Message) -> None:
 
 @dp.message(Command("help"))
 async def handle_help_cmd(message: Message) -> None:
-    await message.answer(TEXT_HELP, parse_mode="HTML")
+    await message.answer(TEXT_HELP, parse_mode="HTML",
+                         reply_markup=support_keyboard())
 
 
 @dp.message(Command("docs"))
@@ -268,12 +283,14 @@ async def handle_docs_cmd(message: Message) -> None:
 
 @dp.message(F.text == BTN_HELP)
 async def handle_help_btn(message: Message) -> None:
-    await message.answer(TEXT_HELP, parse_mode="HTML")
+    await message.answer(TEXT_HELP, parse_mode="HTML",
+                         reply_markup=support_keyboard())
 
 
 @dp.message(F.text == BTN_ABOUT)
 async def handle_about_btn(message: Message) -> None:
-    await message.answer(TEXT_ABOUT, parse_mode="HTML")
+    await message.answer(TEXT_ABOUT, parse_mode="HTML",
+                         disable_web_page_preview=True)
 
 
 @dp.message(F.text == BTN_SUB)
@@ -286,11 +303,7 @@ async def handle_subscription(message: Message) -> None:
         f"💎 <b>Тарифы</b>\n\n"
         f"Твой текущий тариф: <b>{current.title}</b>\n\n"
         f"{cards}\n\n"
-        f"⚠️ Оплата скоро будет подключена.\n\n"
-        f"Оформляя подписку, вы принимаете "
-        f"<a href=\"{URL_OFERTA}\">оферту</a>, "
-        f"<a href=\"{URL_PRIVACY}\">политику конфиденциальности</a> и "
-        f"<a href=\"{URL_REFUND}\">политику возврата</a>."
+        f"<i>Пакет продлевается автоматически.</i>"
     )
     await message.answer(
         text, parse_mode="HTML", reply_markup=subscribe_keyboard(),
@@ -345,23 +358,22 @@ async def handle_buy(callback: CallbackQuery) -> None:
 @dp.callback_query(F.data.startswith("pay:"))
 async def handle_payment_method(callback: CallbackQuery) -> None:
     """
-    Выбран способ оплаты (card / sbp).
-    ПОКА заглушка: когда подключится платёжная система, здесь будет
-    создание счёта и ссылка на оплату. Структура уже готова под это.
+    Выбран способ оплаты (card / sbp) — просто подтверждаем выбор всплывашкой.
+    Реальное создание счёта произойдёт по кнопке «Оплатить» (handle_pay_now),
+    когда подключится платёжная система.
+    """
+    _, method, plan_code = callback.data.split(":", 2)
+    method_name = "Картой" if method == "card" else "СБП"
+    await callback.answer(f"Способ оплаты: {method_name}")
+
+
+@dp.callback_query(F.data.startswith("paynow:"))
+async def handle_pay_now(callback: CallbackQuery) -> None:
+    """
+    Кнопка «Оплатить». ПОКА заглушка — никуда не ведёт.
+    Здесь подключится платёжная система (создание счёта и ссылка на оплату).
     """
     await callback.answer()
-    _, method, plan_code = callback.data.split(":", 2)
-    plan = get_plan(plan_code)
-    method_name = "картой" if method == "card" else "по СБП"
-
-    await callback.message.answer(
-        f"💳 Оплата {method_name} тарифа <b>{plan.title}</b> "
-        f"на {plan.price_rub} ₽.\n\n"
-        f"⚠️ Приём платежей скоро заработает. "
-        f"По вопросам оплаты — <a href=\"{SUPPORT_URL}\">техподдержка</a>.",
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
 
 
 @dp.callback_query(F.data == "back:plans")
@@ -371,10 +383,7 @@ async def handle_back_to_plans(callback: CallbackQuery) -> None:
     cards = "\n\n".join(format_plan_card(p) for p in PLANS.values())
     text = (
         f"💎 <b>Тарифы</b>\n\n{cards}\n\n"
-        f"Оформляя подписку, вы принимаете "
-        f"<a href=\"{URL_OFERTA}\">оферту</a>, "
-        f"<a href=\"{URL_PRIVACY}\">политику конфиденциальности</a> и "
-        f"<a href=\"{URL_REFUND}\">политику возврата</a>."
+        f"<i>Пакет продлевается автоматически.</i>"
     )
     await callback.message.answer(
         text, parse_mode="HTML", reply_markup=subscribe_keyboard(),
