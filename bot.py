@@ -213,8 +213,6 @@ def payment_method_keyboard(plan_code: str) -> InlineKeyboardMarkup:
                                   callback_data=f"pay:card:{plan_code}")],
             [InlineKeyboardButton(text="🏦 Оплатить по СБП",
                                   callback_data=f"pay:sbp:{plan_code}")],
-            [InlineKeyboardButton(text="✅ Оплатить",
-                                  callback_data=f"paynow:{plan_code}")],
             [InlineKeyboardButton(text="⬅️ Назад к тарифам",
                                   callback_data="back:plans")],
         ]
@@ -302,8 +300,7 @@ async def handle_subscription(message: Message) -> None:
     text = (
         f"💎 <b>Тарифы</b>\n\n"
         f"Твой текущий тариф: <b>{current.title}</b>\n\n"
-        f"{cards}\n\n"
-        f"<i>Пакет продлевается автоматически.</i>"
+        f"{cards}"
     )
     await message.answer(
         text, parse_mode="HTML", reply_markup=subscribe_keyboard(),
@@ -346,7 +343,8 @@ async def handle_buy(callback: CallbackQuery) -> None:
 
     text = (
         f"Оформление: <b>{plan.title}</b>\n"
-        f"Стоимость: <b>{plan.price_rub} ₽</b> (пакет на {plan.days} дней)\n\n"
+        f"Стоимость: <b>{plan.price_rub} ₽</b> (пакет на {plan.days} дней)\n"
+        f"Через {plan.days} дней тариф продлевается при отсутствии отказа.\n\n"
         f"Выбери способ оплаты:"
     )
     await callback.message.answer(
@@ -358,22 +356,16 @@ async def handle_buy(callback: CallbackQuery) -> None:
 @dp.callback_query(F.data.startswith("pay:"))
 async def handle_payment_method(callback: CallbackQuery) -> None:
     """
-    Выбран способ оплаты (card / sbp) — просто подтверждаем выбор всплывашкой.
-    Реальное создание счёта произойдёт по кнопке «Оплатить» (handle_pay_now),
-    когда подключится платёжная система.
-    """
-    _, method, plan_code = callback.data.split(":", 2)
-    method_name = "Картой" if method == "card" else "СБП"
-    await callback.answer(f"Способ оплаты: {method_name}")
-
-
-@dp.callback_query(F.data.startswith("paynow:"))
-async def handle_pay_now(callback: CallbackQuery) -> None:
-    """
-    Кнопка «Оплатить». ПОКА заглушка — никуда не ведёт.
-    Здесь подключится платёжная система (создание счёта и ссылка на оплату).
+    Выбран способ оплаты (card / sbp).
+    ПОКА заглушка: показываем, что приём оплаты скоро будет подключён.
+    Когда подключится платёжная система — здесь будет создание счёта
+    и ссылка на оплату.
     """
     await callback.answer()
+    await callback.message.answer(
+        "⏳ Приём оплаты скоро будет подключён.",
+        parse_mode="HTML",
+    )
 
 
 @dp.callback_query(F.data == "back:plans")
@@ -382,8 +374,7 @@ async def handle_back_to_plans(callback: CallbackQuery) -> None:
     await callback.answer()
     cards = "\n\n".join(format_plan_card(p) for p in PLANS.values())
     text = (
-        f"💎 <b>Тарифы</b>\n\n{cards}\n\n"
-        f"<i>Пакет продлевается автоматически.</i>"
+        f"💎 <b>Тарифы</b>\n\n{cards}"
     )
     await callback.message.answer(
         text, parse_mode="HTML", reply_markup=subscribe_keyboard(),
