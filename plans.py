@@ -118,7 +118,10 @@ def account_cost(minutes_fast: float, minutes_speakers: float) -> float:
 def _format_hours(minutes: int) -> str:
     """Красиво показывает лимит: часы, если кратно, иначе минуты."""
     if minutes >= 60 and minutes % 60 == 0:
-        return f"{minutes // 60} часов"
+        h = minutes // 60
+        word = "час" if h % 10 == 1 and h % 100 != 11 else (
+            "часа" if h % 10 in (2, 3, 4) and h % 100 not in (12, 13, 14) else "часов")
+        return f"{h} {word}"
     return f"{minutes} минут"
 
 

@@ -54,9 +54,12 @@ LAVA_SECRET_KEY = os.getenv("LAVA_SECRET_KEY", "").strip()
 LAVA_ADDITIONAL_KEY = os.getenv("LAVA_ADDITIONAL_KEY", "").strip()
 
 # Спрашивать ли у пользователя email перед первой оплатой.
-# По умолчанию НЕ спрашиваем. Если Lava начнёт требовать email
-# при создании подписчика — поставь LAVA_REQUIRE_EMAIL=1.
-LAVA_REQUIRE_EMAIL = os.getenv("LAVA_REQUIRE_EMAIL", "0").strip() not in ("0", "false", "no", "")
+# Lava требует email подписчика и отправляет на него чеки, поэтому по умолчанию
+# бот один раз спрашивает email (LAVA_REQUIRE_EMAIL=1).
+# LAVA_REQUIRE_EMAIL=0 — не спрашивать, подставлять технический адрес
+# tg<ID>@<LAVA_EMAIL_DOMAIN> (тогда чеки пользователю не придут).
+LAVA_REQUIRE_EMAIL = os.getenv("LAVA_REQUIRE_EMAIL", "1").strip() not in ("0", "false", "no", "")
+LAVA_EMAIL_DOMAIN = os.getenv("LAVA_EMAIL_DOMAIN", "protocolist.ru").strip().lstrip("@")
 
 # ID продуктов подписки в Lava. Обычно НЕ нужны: бот сам находит продукты
 # по цене (300 ₽ -> Стандарт, 600 ₽ -> Макс). Укажи, только если цены совпадут.

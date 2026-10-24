@@ -152,6 +152,15 @@ def consumer_id_for(user_id: int) -> str:
     return f"tg{user_id}"
 
 
+async def _ensure_consumer(consumer_id: str, email: str, user_id: int) -> None:
+    """Создать подписчика в Lava. Ошибку только логируем: он мог уже существовать."""
+    try:
+        await lava.create_consumer(consumer_id, email)
+        db.set_lava_consumer(user_id)
+    except LavaError as e:
+        logger.warning("create_consumer %s: %s", consumer_id, e)
+
+
 async def start_purchase(user_id: int, plan_code: str) -> dict:
     """
     Оформляет подписку и возвращает {"order_id", "url", "amount"}.
@@ -176,22 +185,31 @@ async def start_purchase(user_id: int, plan_code: str) -> dict:
         raise PurchaseError("Этот тариф сейчас недоступен для оплаты. Напиши в поддержку.")
 
     consumer_id = consumer_id_for(user_id)
+    email = user.get("email") or f"{consumer_id}@{config.LAVA_EMAIL_DOMAIN}"
     if not user.get("lava_consumer"):
-        try:
-            await lava.create_consumer(consumer_id, user.get("email"))
-        except LavaError as e:
-            # Подписчик мог уже существовать (например, после переустановки бота).
-            # Не останавливаемся: если его действительно нет, упадёт следующий шаг.
-            logger.warning("create_consumer %s: %s — пробуем оформить подписку", consumer_id, e)
-        db.set_lava_consumer(user_id)
+        await _ensure_consumer(consumer_id, email, user_id)
 
     order_id = f"sub{user_id}x{int(time.time())}x{secrets.token_hex(3)}"
     try:
         data = await lava.subscribe(product_id, consumer_id, order_id)
     except LavaError as e:
-        logger.error("subscribe %s: %s", order_id, e)
-        raise PurchaseError("Не получилось создать ссылку на оплату. Попробуй ещё раз или напиши в поддержку.")
+        if "подписчик" in str(e).lower():
+            # Lava не знает этого подписчика (например, раньше он не создался).
+            # Создаём заново и пробуем ещё раз.
+            logger.warning("subscribe %s: %s — создаём подписчика заново", order_id, e)
+            await _ensure_consumer(consumer_id, email, user_id)
+            try:
+                data = await lava.subscribe(product_id, consumer_id, order_id)
+            except LavaError as e2:
+                logger.error("subscribe %s (повтор): %s", order_id, e2)
+                raise PurchaseError("Не получилось создать ссылку на оплату. "
+                                    "Попробуй ещё раз или напиши в поддержку.")
+        else:
+            logger.error("subscribe %s: %s", order_id, e)
+            raise PurchaseError("Не получилось создать ссылку на оплату. "
+                                "Попробуй ещё раз или напиши в поддержку.")
 
+    db.set_lava_consumer(user_id)  # подписка оформилась — подписчик точно есть
     url = (data or {}).get("url")
     if not url:
         logger.error("Lava не вернула ссылку на оплату: %s", data)

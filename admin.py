@@ -457,7 +457,8 @@ async def handle_lavacheck(message: Message) -> None:
     for code in PAID_PLANS:
         pid = mapping.get(code)
         lines.append(f"• {PLANS[code].title}: " + ("✅ найден продукт" if pid else "❌ продукт не найден"))
-    lines.append(f"\nEmail при оплате: {'спрашиваем' if config.LAVA_REQUIRE_EMAIL else 'не спрашиваем'}")
+    lines.append("\nEmail при оплате: " + ("спрашиваем у пользователя" if config.LAVA_REQUIRE_EMAIL
+                 else f"технический tg&lt;ID&gt;@{config.LAVA_EMAIL_DOMAIN}"))
     lines.append(f"Комиссия в расчётах: {(1 - NET_REVENUE_SHARE) * 100:.0f}%")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
