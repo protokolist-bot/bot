@@ -23,7 +23,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import (
     Message,
     FSInputFile,
@@ -49,6 +49,9 @@ from doc_builder import (
     build_summary_docx,
 )
 import admin
+import payments
+from payments import PurchaseError, fmt_date, fmt_hours
+from lava import LavaError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +74,11 @@ URL_PATTERN = re.compile(r"https?://\S+")
 
 # Хранилище сессий обработки: ключ -> {url, mode, summary_type, awaiting_custom, user_id}
 sessions: dict[str, dict] = {}
+
+# Ждём от пользователя email перед оплатой: user_id -> код тарифа.
+awaiting_email: dict[int, str] = {}
+
+EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 # Кнопки постоянной клавиатуры.
 BTN_SUB = "💎 Подписка"
@@ -202,21 +210,10 @@ def support_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def payment_method_keyboard(plan_code: str) -> InlineKeyboardMarkup:
-    """
-    Кнопки выбора способа оплаты для выбранного тарифа.
-    callback_data: "pay:<способ>:<тариф>" — card или sbp.
-    """
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить картой",
-                                  callback_data=f"pay:card:{plan_code}")],
-            [InlineKeyboardButton(text="🏦 Оплатить по СБП",
-                                  callback_data=f"pay:sbp:{plan_code}")],
-            [InlineKeyboardButton(text="⬅️ Назад к тарифам",
-                                  callback_data="back:plans")],
-        ]
-    )
+def cancel_email_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="email:cancel")],
+    ])
 
 
 # ---------- Админ-команды (регистрируем ПЕРВЫМИ, до общих хендлеров) ----------
@@ -236,11 +233,59 @@ async def cmd_risky(message: Message) -> None:
     await admin.handle_risky(message)
 
 
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message) -> None:
+    await admin.handle_admin_help(message)
+
+
+@dp.message(Command("subs"))
+async def cmd_subs(message: Message) -> None:
+    await admin.handle_subs(message)
+
+
+@dp.message(Command("user"))
+async def cmd_user(message: Message) -> None:
+    await admin.handle_user(message)
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: Message) -> None:
+    await admin.handle_cancel(message)
+
+
+@dp.message(Command("payments"))
+async def cmd_payments(message: Message) -> None:
+    await admin.handle_payments(message)
+
+
+@dp.message(Command("lavacheck"))
+async def cmd_lavacheck(message: Message) -> None:
+    await admin.handle_lavacheck(message)
+
+
+@dp.callback_query(F.data.startswith("adm:"))
+async def cb_admin(callback: CallbackQuery) -> None:
+    await admin.handle_admin_callback(callback)
+
+
 # ---------- Команды и кнопки меню ----------
 
 @dp.message(CommandStart())
-async def handle_start(message: Message) -> None:
+async def handle_start(message: Message, command: CommandObject) -> None:
     db.get_or_create_user(message.from_user.id, message.from_user.username)
+
+    # Возврат со страницы оплаты Lava: t.me/<бот>?start=paid / ?start=payfail
+    if command.args == "paid":
+        await check_latest_payment(message, message.from_user.id)
+        return
+    if command.args == "payfail":
+        await message.answer(
+            "❌ Оплата не прошла или была отменена.\n\n"
+            "Попробуй ещё раз в «💎 Подписка». Если деньги списались, "
+            f"а часы не появились — напиши в поддержку: @{SUPPORT_USERNAME}",
+            reply_markup=main_keyboard(),
+        )
+        return
 
     # Если в папке есть файл приветственной гифки — отправляем её с текстом.
     # Поддерживаем welcome.mp4 (видео-гифка) и welcome.gif.
@@ -313,59 +358,247 @@ async def handle_limit(message: Message) -> None:
     user = db.get_or_create_user(message.from_user.id, message.from_user.username)
     plan = get_plan(user["plan"])
     remaining = db.get_remaining_minutes(message.from_user.id)
+    limit = db.minutes_limit(user)
 
     text = f"📊 <b>Твой тариф</b>\n\nТариф: <b>{plan.title}</b>\n"
 
     # Остаток часов/минут.
-    if remaining >= 60:
-        text += f"Осталось: <b>{remaining/60:.1f} ч</b> ({remaining:.0f} мин) из {plan.minutes//60} ч\n"
+    if limit >= 60:
+        text += f"Осталось: <b>{fmt_hours(remaining)}</b> ({remaining:.0f} мин) из {fmt_hours(limit)}\n"
     else:
-        text += f"Осталось: <b>{remaining:.0f} мин</b> из {plan.minutes} мин\n"
+        text += f"Осталось: <b>{remaining:.0f} мин</b> из {limit:.0f} мин\n"
 
-    # Срок действия: для платных пакетов — дата окончания, для Free — сброс.
+    keyboard = None
+    sub = db.get_user_live_subscription(message.from_user.id)
     if plan.price_rub > 0 and user.get("plan_until"):
-        text += f"Пакет действует до: <b>{user['plan_until'][:10]}</b>\n"
+        text += f"Пакет действует до: <b>{fmt_date(user['plan_until'])}</b>\n"
     elif plan.price_rub == 0:
-        text += f"Обновление лимита: {user['reset_at'][:10]}\n"
+        text += f"Обновление лимита: {fmt_date(user['reset_at'])}\n"
         if not plan.speakers and plan.free_speaker_trials > 0:
             left = max(0, plan.free_speaker_trials - user["speaker_trials_used"])
             text += f"Пробных диаризаций осталось: <b>{left}</b>\n"
 
-    await message.answer(text, parse_mode="HTML")
+    if sub:
+        sub_plan = get_plan(sub["plan"])
+        if sub["status"] == db.SUB_SUSPENDED:
+            text += (f"\n⚠️ Автопродление «{sub_plan.title}»: последнее списание не прошло. "
+                     f"Проверь карту.\n")
+        else:
+            text += (f"\n🔄 Автопродление: <b>включено</b>\n"
+                     f"Следующее списание: {sub['amount']:.0f} ₽ — {fmt_date(sub['next_pay_time'])}\n")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отключить автопродление",
+                                  callback_data=f"unsub:ask:{sub['order_id']}")],
+        ])
+    elif plan.price_rub > 0:
+        text += "\n🔄 Автопродление: выключено\n"
+
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 @dp.callback_query(F.data.startswith("buy:"))
 async def handle_buy(callback: CallbackQuery) -> None:
-    """Выбран тариф — показываем выбор способа оплаты."""
+    """Выбран тариф — сразу создаём ссылку на оплату."""
     await callback.answer()
     plan_code = callback.data.split(":", 1)[1]
+    if plan_code not in PLANS or PLANS[plan_code].price_rub == 0:
+        return
     plan = get_plan(plan_code)
+    user_id = callback.from_user.id
 
-    text = (
-        f"Оформление: <b>{plan.title}</b>\n"
-        f"Стоимость: <b>{plan.price_rub} ₽</b> (пакет на {plan.days} дней)\n"
-        f"Через {plan.days} дней тариф продлевается при отсутствии отказа.\n\n"
-        f"Выбери способ оплаты:"
+    current = db.get_user_live_subscription(user_id)
+    if current and current["plan"] == plan_code and current["status"] == db.SUB_ACTIVE:
+        await callback.message.answer(
+            f"У тебя уже есть подписка «{plan.title}».\n"
+            f"Следующее списание: {fmt_date(current['next_pay_time'])}.\n\n"
+            f"Управлять ею можно в «📊 Мой лимит».",
+        )
+        return
+
+    note = None
+    if current:
+        note = (f"После оплаты подписка «{get_plan(current['plan']).title}» отключится, "
+                f"а остаток часов перенесётся.")
+    await send_payment_link(callback.message, user_id, plan_code, note)
+
+
+@dp.callback_query(F.data.startswith("agree:"))
+async def handle_agree(callback: CallbackQuery) -> None:
+    """Кнопка из старых сообщений: при необходимости спрашиваем email, затем ссылка."""
+    await callback.answer()
+    plan_code = callback.data.split(":", 1)[1]
+    if plan_code not in PLANS:
+        return
+    await send_payment_link(callback.message, callback.from_user.id, plan_code)
+
+
+@dp.callback_query(F.data == "email:cancel")
+async def handle_email_cancel(callback: CallbackQuery) -> None:
+    awaiting_email.pop(callback.from_user.id, None)
+    await callback.answer("Отменено")
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+
+async def send_payment_link(message: Message, user_id: int, plan_code: str,
+                            note: str | None = None) -> None:
+    """Создаёт подписку в Lava и присылает кнопку оплаты."""
+    user = db.get_or_create_user(user_id)
+    if config.LAVA_REQUIRE_EMAIL and not user.get("email"):
+        awaiting_email[user_id] = plan_code
+        await message.answer(
+            "📧 Укажи email — на него придёт чек об оплате.\n"
+            "Его нужно ввести один раз.",
+            reply_markup=cancel_email_keyboard(),
+        )
+        return
+
+    status = await message.answer("⏳ Создаю ссылку на оплату...")
+    try:
+        order = await payments.start_purchase(user_id, plan_code)
+    except PurchaseError as e:
+        await status.edit_text(f"⚠️ {e}")
+        return
+    except Exception:
+        logger.exception("Ошибка оформления подписки user=%s", user_id)
+        await status.edit_text(
+            "⚠️ Не получилось создать ссылку на оплату. Попробуй ещё раз "
+            f"или напиши в поддержку: @{SUPPORT_USERNAME}"
+        )
+        return
+
+    plan = get_plan(plan_code)
+    await status.edit_text(
+        f"💳 <b>{plan.title}</b> — {order['amount']:.0f} ₽ в месяц\n\n"
+        f"Нажми «Оплатить» — откроется защищённая страница Lava.\n"
+        f"После оплаты часы начислятся автоматически в течение минуты. "
+        f"Если не появились — нажми «Я оплатил».\n\n"
+        f"🔄 Подписка продлевается автоматически каждый месяц. "
+        f"Отключить можно в «📊 Мой лимит»."
+        + (f"\n\nℹ️ {note}" if note else ""),
+        parse_mode="HTML",
+        reply_markup=payments.pay_keyboard(order["url"], order["order_id"], order["amount"]),
     )
-    await callback.message.answer(
-        text, parse_mode="HTML",
-        reply_markup=payment_method_keyboard(plan_code),
-    )
+
+
+async def report_sync_result(message: Message, result: dict) -> None:
+    status = result.get("status")
+    if result.get("credited"):
+        return  # пользователь уже получил сообщение об успешной оплате
+    if status == db.SUB_ACTIVE:
+        await message.answer("✅ Подписка активна, часы начислены. Проверь «📊 Мой лимит».")
+    elif status in (db.SUB_CREATED, db.SUB_EXPIRED):
+        await message.answer(
+            "⏳ Оплата пока не поступила.\n"
+            "Если ты только что оплатил — подожди минуту и нажми «Я оплатил» ещё раз."
+        )
+    elif status == db.SUB_SUSPENDED:
+        await message.answer("⚠️ Списание не прошло. Проверь карту и попробуй снова.")
+    else:
+        await message.answer(
+            f"Статус подписки: {status or 'неизвестен'}. "
+            f"Если что-то не так — напиши в поддержку: @{SUPPORT_USERNAME}"
+        )
+
+
+@dp.callback_query(F.data.startswith("chk:"))
+async def handle_check_payment(callback: CallbackQuery) -> None:
+    """Кнопка «Я оплатил — проверить»."""
+    order_id = callback.data.split(":", 1)[1]
+    sub = db.get_subscription(order_id)
+    if sub is None or sub["user_id"] != callback.from_user.id:
+        await callback.answer("Заказ не найден", show_alert=True)
+        return
+    await callback.answer("Проверяю...")
+    try:
+        result = await payments.sync_subscription(bot, order_id)
+    except LavaError:
+        await callback.message.answer("⚠️ Платёжная система не отвечает. Попробуй через минуту.")
+        return
+    await report_sync_result(callback.message, result)
+
+
+async def check_latest_payment(message: Message, user_id: int) -> None:
+    """Возврат со страницы оплаты: проверяем последний заказ пользователя."""
+    subs = db.get_user_subscriptions(user_id, limit=1)
+    if not subs:
+        await message.answer("Не нашёл твой заказ. Оформи подписку в «💎 Подписка».",
+                             reply_markup=main_keyboard())
+        return
+    await message.answer("🔎 Проверяю оплату...", reply_markup=main_keyboard())
+    result = {"status": subs[0]["status"], "credited": False}
+    for attempt in range(3):
+        try:
+            result = await payments.sync_subscription(bot, subs[0]["order_id"])
+        except LavaError:
+            await message.answer("⚠️ Платёжная система не отвечает. Попробуй через минуту.")
+            return
+        if result.get("status") != db.SUB_CREATED:
+            break
+        await asyncio.sleep(5)  # платёж мог ещё не дойти до Lava
+    await report_sync_result(message, result)
+
+
+@dp.callback_query(F.data.startswith("unsub:"))
+async def handle_unsubscribe(callback: CallbackQuery) -> None:
+    """Отключение автопродления пользователем (с подтверждением)."""
+    _, action, order_id = callback.data.split(":", 2)
+    if action == "no":
+        await callback.answer("Подписка сохранена")
+        await callback.message.edit_text("👍 Автопродление остаётся включённым.")
+        return
+    sub = db.get_subscription(order_id)
+    if sub is None or sub["user_id"] != callback.from_user.id:
+        await callback.answer("Подписка не найдена", show_alert=True)
+        return
+    if sub["status"] not in db.LIVE_STATUSES:
+        await callback.answer("Автопродление уже отключено", show_alert=True)
+        return
+
+    if action == "ask":
+        await callback.answer()
+        user = db.get_or_create_user(callback.from_user.id)
+        await callback.message.answer(
+            f"Отключить автопродление «{get_plan(sub['plan']).title}»?\n\n"
+            f"Списаний больше не будет. Оставшиеся часы действуют до "
+            f"{fmt_date(user.get('plan_until'))}.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Да, отключить",
+                                      callback_data=f"unsub:yes:{order_id}")],
+                [InlineKeyboardButton(text="Нет, оставить",
+                                      callback_data="unsub:no:-")],
+            ]),
+        )
+        return
+    if action == "yes":
+        await callback.answer()
+        try:
+            await payments.cancel_subscription(order_id, "пользователь в боте")
+        except LavaError:
+            logger.exception("Не удалось отменить подписку %s", order_id)
+            await callback.message.edit_text(
+                "⚠️ Не получилось отключить автопродление. Попробуй позже "
+                f"или напиши в поддержку: @{SUPPORT_USERNAME}"
+            )
+            return
+        user = db.get_or_create_user(callback.from_user.id)
+        await callback.message.edit_text(
+            f"✅ Автопродление отключено.\n"
+            f"Оставшиеся часы действуют до {fmt_date(user.get('plan_until'))}."
+        )
+        await payments.notify_admin_text(
+            bot, f"🚫 Пользователь отключил автопродление\n"
+                 f"<code>{callback.from_user.id}</code> "
+                 f"{'@' + callback.from_user.username if callback.from_user.username else ''}\n"
+                 f"{get_plan(sub['plan']).title}",
+        )
 
 
 @dp.callback_query(F.data.startswith("pay:"))
-async def handle_payment_method(callback: CallbackQuery) -> None:
-    """
-    Выбран способ оплаты (card / sbp).
-    ПОКА заглушка: показываем, что приём оплаты скоро будет подключён.
-    Когда подключится платёжная система — здесь будет создание счёта
-    и ссылка на оплату.
-    """
+async def handle_old_pay_buttons(callback: CallbackQuery) -> None:
+    """Старые кнопки «картой / СБП» из сообщений до обновления."""
     await callback.answer()
-    await callback.message.answer(
-        "⏳ Приём оплаты скоро будет подключён.",
-        parse_mode="HTML",
-    )
+    await callback.message.answer("Выбери тариф заново в «💎 Подписка».",
+                                  reply_markup=main_keyboard())
 
 
 @dp.callback_query(F.data == "back:plans")
@@ -392,6 +625,18 @@ async def handle_again(callback: CallbackQuery) -> None:
 
 @dp.message(F.text, ~F.text.startswith("/"))
 async def handle_text(message: Message) -> None:
+    # Ждём email перед оплатой?
+    if message.from_user.id in awaiting_email:
+        email = (message.text or "").strip()
+        if not EMAIL_PATTERN.match(email):
+            await message.answer("Похоже, это не email. Пример: name@mail.ru",
+                                 reply_markup=cancel_email_keyboard())
+            return
+        plan_code = awaiting_email.pop(message.from_user.id)
+        db.set_email(message.from_user.id, email)
+        await send_payment_link(message, message.from_user.id, plan_code)
+        return
+
     # Проверим, не ждём ли мы от пользователя текст "своего запроса" саммари.
     for key, sess in list(sessions.items()):
         if sess.get("awaiting_custom") and sess["user_id"] == message.from_user.id:
@@ -660,8 +905,9 @@ async def start_processing(message: Message, key: str) -> None:
                 if remaining >= 0 and dur > remaining:
                     await status.edit_text(
                         f"⚠️ Недостаточно минут: нужно ~{dur:.0f}, осталось {remaining:.0f}.\n\n"
-                        f"Лимит обновится {user['reset_at'][:10]}, "
-                        f"или докупи часы в «💎 Подписка»."
+                        + (f"Лимит обновится {fmt_date(user['reset_at'])}, "
+                           if plan.price_rub == 0 else "")
+                        + "или смени тариф в «💎 Подписка»."
                     )
                     return
 
@@ -767,6 +1013,23 @@ async def setup_bot_commands() -> None:
         BotCommand(command="help", description="Как пользоваться"),
         BotCommand(command="docs", description="Документы (оферта, политики)"),
     ])
+    # Админу — расширенное меню команд (видно только в чате с ним).
+    if config.ADMIN_ID:
+        from aiogram.types import BotCommandScopeChat
+        try:
+            await bot.set_my_commands([
+                BotCommand(command="admin", description="Админ: все команды"),
+                BotCommand(command="stats", description="Статистика"),
+                BotCommand(command="subs", description="Активные подписки"),
+                BotCommand(command="payments", description="Последние платежи"),
+                BotCommand(command="user", description="Карточка пользователя"),
+                BotCommand(command="cancel", description="Отменить подписку пользователя"),
+                BotCommand(command="risky", description="Рисковые аккаунты"),
+                BotCommand(command="lavacheck", description="Проверка связи с Lava"),
+                BotCommand(command="start", description="Запустить бота"),
+            ], scope=BotCommandScopeChat(chat_id=config.ADMIN_ID))
+        except Exception:
+            logger.warning("Не удалось установить админ-меню команд")
 
 
 async def main() -> None:
@@ -791,7 +1054,12 @@ async def main() -> None:
         return
 
     await setup_bot_commands()
-    await dp.start_polling(bot)
+    # Фоновая сверка оплат с Lava (работает параллельно с ботом).
+    payments_task = asyncio.create_task(payments.worker(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        payments_task.cancel()
 
 
 if __name__ == "__main__":

@@ -47,6 +47,33 @@ MAX_CHUNK_SIZE_BYTES = 24 * 1024 * 1024
 # --- Папка для временных файлов ---
 TEMP_DIR = os.getenv("TEMP_DIR", "temp")
 
+# --- Платёжная система Lava (кабинет Lava -> проект -> «Секретные ключи») ---
+LAVA_SHOP_ID = os.getenv("LAVA_SHOP_ID", "").strip()
+LAVA_SECRET_KEY = os.getenv("LAVA_SECRET_KEY", "").strip()
+# Дополнительный ключ — для проверки вебхуков (сейчас вебхук не используется).
+LAVA_ADDITIONAL_KEY = os.getenv("LAVA_ADDITIONAL_KEY", "").strip()
+
+# Спрашивать ли у пользователя email перед первой оплатой.
+# По умолчанию НЕ спрашиваем. Если Lava начнёт требовать email
+# при создании подписчика — поставь LAVA_REQUIRE_EMAIL=1.
+LAVA_REQUIRE_EMAIL = os.getenv("LAVA_REQUIRE_EMAIL", "0").strip() not in ("0", "false", "no", "")
+
+# ID продуктов подписки в Lava. Обычно НЕ нужны: бот сам находит продукты
+# по цене (300 ₽ -> Стандарт, 600 ₽ -> Макс). Укажи, только если цены совпадут.
+LAVA_PRODUCT_STANDARD = os.getenv("LAVA_PRODUCT_STANDARD", "").strip()
+LAVA_PRODUCT_MAX = os.getenv("LAVA_PRODUCT_MAX", "").strip()
+
+# Имя бота (без @) — для ссылок возврата после оплаты.
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Protocolist_bot").strip().lstrip("@")
+
+# Присылать ли админу уведомления о покупках, продлениях и отменах.
+ADMIN_PAYMENT_NOTIFY = os.getenv("ADMIN_PAYMENT_NOTIFY", "1").strip() not in ("0", "false", "no", "")
+
+
+def lava_configured() -> bool:
+    """Заданы ли ключи Lava (без них оплата недоступна)."""
+    return bool(LAVA_SHOP_ID and LAVA_SECRET_KEY)
+
 
 def validate_config() -> None:
     """Проверяем обязательные секреты. Нет — падаем сразу с понятной ошибкой."""
