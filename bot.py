@@ -21,6 +21,7 @@ import re
 import uuid
 import asyncio
 import logging
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, CommandObject
@@ -990,7 +991,9 @@ async def start_processing(message: Message, key: str) -> None:
         await status.delete()
 
     except Exception:
-        logger.exception("Ошибка обработки (url=%s, файл=%s)", url, bool(ready_audio))
+        # Полную ссылку в лог не пишем — только домен платформы.
+        domain = urlparse(url).netloc if url else None
+        logger.exception("Ошибка обработки (платформа=%s, файл=%s)", domain, bool(ready_audio))
         await status.edit_text(
             "❌ Не получилось обработать.\n"
             "Если это ссылка — возможно, платформа не поддерживается или видео "
